@@ -12,7 +12,7 @@ interface ColumnSelectorProps {
 
 const ColumnSelector: React.FC<ColumnSelectorProps> = ({ columns, onToggleColumn, onToggleAll }) => {
   const allSelected = columns.every(col => col.selected);
-  const someSelected = columns.some(col => col.selected);
+  const someSelected = columns.some(col => col.selected) && !allSelected;
   
   return (
     <div className="space-y-4">
@@ -20,8 +20,7 @@ const ColumnSelector: React.FC<ColumnSelectorProps> = ({ columns, onToggleColumn
         <div className="flex items-center space-x-2">
           <Checkbox 
             id="select-all" 
-            checked={allSelected} 
-            indeterminate={someSelected && !allSelected}
+            checked={allSelected}
             onCheckedChange={(checked) => onToggleAll(!!checked)} 
           />
           <label htmlFor="select-all" className="text-sm font-medium">

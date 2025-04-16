@@ -170,10 +170,6 @@ def get_clickhouse_client(config):
         raise ConnectionError(f"An unexpected error occurred during connection setup: {e}") from e
 
 
-@app.route('/')
-def index():
-    return render_template('index.html')
-
 @app.route('/get_tables', methods=['POST'])
 def get_tables():
     config = request.json

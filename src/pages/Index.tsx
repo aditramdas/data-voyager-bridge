@@ -20,6 +20,7 @@ export interface ClickHouseConfig {
   database: string;
   user: string;
   jwtToken: string;
+  password?: string;
   table?: string;
 }
 
@@ -44,10 +45,18 @@ const Index = () => {
     database: '',
     user: '',
     jwtToken: '',
+    password: '',
   });
   const [targetConfig, setTargetConfig] = useState<ClickHouseConfig | FlatFileConfig>({
     filename: '',
     delimiter: ',',
+    host: '',
+    port: '8123',
+    database: '',
+    user: '',
+    jwtToken: '',
+    password: '',
+    table: '',
   });
   const [columns, setColumns] = useState<Column[]>([]);
   const [status, setStatus] = useState<Status>('idle');
@@ -101,7 +110,7 @@ const Index = () => {
             database: (sourceConfig as ClickHouseConfig).database,
             user: (sourceConfig as ClickHouseConfig).user,
             jwt: (sourceConfig as ClickHouseConfig).jwtToken, // Map jwtToken to jwt
-            password: "" // TODO: Add password field to UI and state if needed
+            password: (sourceConfig as ClickHouseConfig).password // Include password
           }
         : { // Map frontend FF state to backend expected keys
             file_path: (sourceConfig as FlatFileConfig).filename, // Map filename to file_path
@@ -190,7 +199,7 @@ const Index = () => {
         database: (sourceConfig as ClickHouseConfig).database,
         user: (sourceConfig as ClickHouseConfig).user,
         jwt: (sourceConfig as ClickHouseConfig).jwtToken, // Map jwtToken to jwt
-        password: "" // TODO: Add password field
+        password: (sourceConfig as ClickHouseConfig).password // Include password
       };
 
     try {
@@ -264,7 +273,7 @@ const Index = () => {
         database: (sourceConfig as ClickHouseConfig).database,
         user: (sourceConfig as ClickHouseConfig).user,
         jwt: (sourceConfig as ClickHouseConfig).jwtToken,
-        password: "", // TODO: Add password field
+        password: (sourceConfig as ClickHouseConfig).password, // Include password
         source_table: selectedTable,
         // Target Flat File config
         target_file: (targetConfig as FlatFileConfig).filename, // Map filename to target_file
@@ -279,14 +288,14 @@ const Index = () => {
          source_file: (sourceConfig as FlatFileConfig).filename, // Map filename to source_file
          source_delimiter: (sourceConfig as FlatFileConfig).delimiter,
          source_has_header: true, // Assuming header if columns were selectable
-         // Target ClickHouse config
+         // Target ClickHouse config (uses targetConfig state)
          host: (targetConfig as ClickHouseConfig).host,
          port: (targetConfig as ClickHouseConfig).port,
          database: (targetConfig as ClickHouseConfig).database,
          user: (targetConfig as ClickHouseConfig).user,
          jwt: (targetConfig as ClickHouseConfig).jwtToken,
-         password: "", // TODO: Add password field
-         target_table: (targetConfig as ClickHouseConfig).table, // Assumes table is part of CH config
+         password: (targetConfig as ClickHouseConfig).password, // Include password from targetConfig
+         target_table: (targetConfig as ClickHouseConfig).table,
          target_create: true // TODO: Make this configurable in TargetConfig UI
        };
     } else {

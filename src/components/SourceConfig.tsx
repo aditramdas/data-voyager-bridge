@@ -1,4 +1,3 @@
-
 import React from 'react';
 import { Label } from "@/components/ui/label";
 import { Input } from "@/components/ui/input";
@@ -69,7 +68,17 @@ const SourceConfig: React.FC<SourceConfigProps> = ({ type, config, onConfigChang
           />
         </div>
         <div className="space-y-2">
-          <Label htmlFor="jwtToken">JWT Token</Label>
+          <Label htmlFor="password">Password <span className="text-xs text-muted-foreground">(or use JWT)</span></Label>
+          <Input
+            id="password"
+            type="password"
+            placeholder="Enter password"
+            value={(config as ClickHouseConfig).password || ''}
+            onChange={(e) => handleClickHouseChange('password' as keyof ClickHouseConfig, e.target.value)}
+          />
+        </div>
+        <div className="space-y-2">
+          <Label htmlFor="jwtToken">JWT Token <span className="text-xs text-muted-foreground">(or use Password)</span></Label>
           <Input
             id="jwtToken"
             type="password"

@@ -2,104 +2,173 @@ from flask import Flask, render_template, request, jsonify
 import clickhouse_connect
 import pandas as pd
 import io
-import os # Added for basic path validation
+import os
+import jwt # Import PyJWT
+import logging # For better logging
 
 app = Flask(__name__)
 
-# Mock function for JWT validation (replace with actual validation)
-# In a real app, you would verify the token signature and claims
+# --- Configuration ---
+# IMPORTANT: Replace with your actual secret key! Keep this secret!
+# Consider loading from environment variables or a config file.
+JWT_SECRET_KEY = os.environ.get('JWT_SECRET_KEY', 'au23iouhWENJ')
+# Define an allowed base directory for file operations
+# IMPORTANT: Ensure this directory exists and the application has write permissions.
+ALLOWED_FILE_PATH_BASE = os.path.abspath(os.path.join(os.path.dirname(__file__), 'data_files'))
+
+# Ensure the base directory for files exists
+if not os.path.exists(ALLOWED_FILE_PATH_BASE):
+    try:
+        os.makedirs(ALLOWED_FILE_PATH_BASE)
+        print(f"Created allowed data directory: {ALLOWED_FILE_PATH_BASE}")
+    except OSError as e:
+        print(f"CRITICAL ERROR: Failed to create data directory {ALLOWED_FILE_PATH_BASE}: {e}")
+        # Consider exiting if the directory is essential and cannot be created
+
+# Configure basic logging
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
+
+# --- Utility Functions ---
+
+def validate_and_normalize_path(user_path):
+    """Validates if the path is within the ALLOWED_FILE_PATH_BASE and returns the absolute path."""
+    if not user_path:
+        raise ValueError("File path cannot be empty.")
+
+    # Prevent directory traversal attacks (basic checks)
+    if ".." in user_path or user_path.startswith(("/", "\\")):
+         raise ValueError("Invalid file path format or attempt to access restricted areas.")
+
+    # Create absolute path based on the allowed base directory
+    absolute_user_path = os.path.abspath(os.path.join(ALLOWED_FILE_PATH_BASE, user_path))
+
+    # Check if the resulting path is truly within the allowed base directory
+    if os.path.commonpath([ALLOWED_FILE_PATH_BASE]) != os.path.commonpath([ALLOWED_FILE_PATH_BASE, absolute_user_path]):
+        logging.warning(f"Path validation failed: User path '{user_path}' resolved outside allowed base '{ALLOWED_FILE_PATH_BASE}'")
+        raise ValueError("Specified path is outside the allowed data directory.")
+
+    logging.info(f"Validated path: '{user_path}' -> '{absolute_user_path}'")
+    return absolute_user_path
+
 def validate_jwt(token):
-    print(f"Validating token: {token[:10]}...") # Avoid logging the full token
-    # This is a placeholder - real validation needed!
-    return token is not None and len(token) > 20 # Basic check
+    """Validates the JWT token using PyJWT."""
+    if not token:
+        return False # Or raise an error if JWT is mandatory
+    try:
+        # Decode the token. This verifies signature and expiration (if exp claim exists)
+        # Specify the algorithm(s) you expect.
+        # Add audience or issuer checks if needed: options={"require": ["exp", "iss", "aud"]}
+        payload = jwt.decode(
+            token,
+            JWT_SECRET_KEY,
+            algorithms=["HS256"] # Adjust algorithm as needed (e.g., RS256)
+        )
+        logging.info(f"JWT validated successfully for user/subject: {payload.get('sub', 'N/A')}")
+        return True # Token is valid
+    except jwt.ExpiredSignatureError:
+        logging.warning("JWT validation failed: Token has expired")
+        raise ValueError("Authentication token has expired. Please provide a fresh token.")
+    except jwt.InvalidTokenError as e:
+        # Catches various errors like invalid signature, malformed token, etc.
+        logging.warning(f"JWT validation failed: Invalid token - {e}")
+        raise ValueError(f"Authentication token is invalid: {e}")
+    except Exception as e:
+        # Catch unexpected errors during validation
+        logging.error(f"Unexpected error during JWT validation: {e}", exc_info=True)
+        raise ValueError("An unexpected error occurred during token validation.")
 
 
 def get_clickhouse_client(config):
     """Establishes a ClickHouse connection using provided config."""
+    # (Error handling within this function is already reasonably detailed)
+    # Added check for JWT validation result
+    jwt_token = config.get('jwt')
+    password = config.get('password')
+    auth_method = None
+
     try:
-        # Input validation
+        # ... (rest of the initial validation remains the same) ...
         required_keys = ['host', 'port', 'database', 'user']
         if not all(key in config and config[key] for key in required_keys):
              raise ValueError("Missing required ClickHouse connection parameters (host, port, database, user).")
 
-        if not config.get('password') and not config.get('jwt'):
+        if not password and not jwt_token:
              raise ValueError("Either password or JWT token must be provided for ClickHouse connection.")
 
-        # Prepare connection parameters
+        # Prepare connection parameters (same as before)
         connect_args = {
             'host': config['host'],
             'port': int(config['port']), # Ensure port is int
             'database': config['database'],
             'user': config['user'],
             'secure': config.get('secure', False), # Default to False if not provided
-            # Add settings useful for ingestion
             'settings': {
-                'insert_deduplicate': 0, # Common settings, adjust as needed
+                'insert_deduplicate': 0,
                 'insert_distributed_sync': 1
             }
         }
 
-        jwt_token = config.get('jwt')
-        password = config.get('password')
-
         if jwt_token:
-            # Basic check if JWT seems valid (replace with real validation)
+            logging.info("Attempting JWT validation...")
+            # *** Actual JWT validation happens here ***
             if not validate_jwt(jwt_token):
-                 raise ValueError("Invalid JWT token provided.")
-            # How to pass JWT depends on the connection method (HTTP vs Native)
-            # For HTTP/S (ports 8123/8443 typically):
+                 # validate_jwt now raises ValueError on failure, so this might not be hit
+                 # but kept as a safeguard if validate_jwt is changed to return False
+                 raise ValueError("JWT token validation failed.")
+            auth_method = "JWT"
+
             if connect_args['port'] in [8123, 8443]:
-                 print("Using JWT via HTTP Headers")
+                 logging.info("Using JWT via HTTP Headers for connection.")
                  connect_args['http_headers'] = {'Authorization': f'Bearer {jwt_token}'}
-                 # Ensure password is not sent if JWT is used for HTTP
                  connect_args.pop('password', None)
             else:
-                # For Native protocol, JWT might be passed differently or not directly supported
-                # by clickhouse-connect in this way. Check library docs for specifics.
-                # Often, native protocol uses user/password. If JWT is the *only* mechanism,
-                # a proxy or specific ClickHouse setup might be needed.
-                # For now, we'll assume if JWT is provided for non-HTTP ports, it might fail
-                # or require password as fallback/primary if JWT isn't natively supported here.
-                print(f"Warning: JWT provided for non-standard HTTP port ({connect_args['port']}). Authentication might rely on password if provided, or fail.")
-                if password:
-                    connect_args['password'] = password
-                else:
-                    # If only JWT is given for native, raise error as it's likely not supported directly
-                    raise ValueError(f"JWT authentication might not be supported for native protocol on port {connect_args['port']} without specific server config. Try password or HTTP port.")
+                # Handle non-HTTP ports - assuming password might still be needed or JWT used differently
+                 logging.warning(f"JWT provided for non-HTTP port ({connect_args['port']}). Protocol might not natively support JWT header. Relying on password if provided.")
+                 if password:
+                     connect_args['password'] = password
+                     auth_method = "Password (JWT provided but non-HTTP port)"
+                 else:
+                     # If only JWT for native, it's unlikely to work with clickhouse-connect directly
+                     raise ValueError(f"JWT authentication via native protocol on port {connect_args['port']} likely requires password or specific server/proxy setup.")
+
         elif password:
             connect_args['password'] = password
+            auth_method = "Password"
         else:
-             # This case is already checked above, but as a safeguard
-             raise ValueError("No password or JWT token provided.")
+             raise ValueError("No password or JWT token provided.") # Should be caught earlier
 
-        print(f"Attempting connection to {connect_args['host']}:{connect_args['port']}...")
-        # Remove sensitive info before potentially logging args
+        logging.info(f"Attempting connection to {connect_args['host']}:{connect_args['port']} using {auth_method}...")
+        # Remove sensitive info before logging args
         log_args = connect_args.copy()
         log_args.pop('password', None)
-        log_args.pop('jwt', None)
+        # log_args.pop('jwt', None) # JWT already validated, no need to log
         if 'http_headers' in log_args: log_args['http_headers'] = {'Authorization': 'Bearer [REDACTED]'}
-        print(f"Connection args (sensitive info redacted): {log_args}")
+        logging.debug(f"Connection args (sensitive info redacted): {log_args}") # Log args at DEBUG level
 
         client = clickhouse_connect.get_client(**connect_args)
         client.ping() # Verify connection
-        print("ClickHouse connection successful.")
+        logging.info("ClickHouse connection successful.")
         return client
-    except ValueError as ve:
-         print(f"Configuration Error: {ve}")
-         raise # Re-raise validation errors
+
+    except (ValueError, ConnectionError) as ve:
+         logging.error(f"Connection/Configuration Error: {ve}", exc_info=True) # Log trace for value/conn errors
+         raise # Re-raise user-facing errors
     except clickhouse_connect.driver.exceptions.Error as ch_err:
-        print(f"ClickHouse Connection Error: {ch_err}")
-        # Provide more specific feedback if possible
+        logging.error(f"ClickHouse Driver Error: {ch_err}", exc_info=True)
         err_str = str(ch_err).lower()
+        # More specific error messages remain useful
         if 'authentication failed' in err_str or 'auth failed' in err_str:
-            raise ConnectionError(f"ClickHouse authentication failed for user '{config.get('user', 'N/A')}'. Check credentials/JWT.") from ch_err
+            raise ConnectionError(f"ClickHouse authentication failed for user '{config.get('user', 'N/A')}'. Check credentials/token.") from ch_err
         elif 'connection refused' in err_str or 'timed out' in err_str:
-             raise ConnectionError(f"Could not connect to ClickHouse at {config.get('host', 'N/A')}:{config.get('port', 'N/A')}. Check host/port and network connectivity.") from ch_err
+             raise ConnectionError(f"Could not connect to ClickHouse at {config.get('host', 'N/A')}:{config.get('port', 'N/A')}. Check host/port and network.") from ch_err
+        elif 'unknown database' in err_str:
+             raise ValueError(f"ClickHouse database '{config.get('database', 'N/A')}' not found.") from ch_err
         else:
-            raise ConnectionError(f"ClickHouse error: {ch_err}") from ch_err
+            raise ConnectionError(f"ClickHouse driver error: {ch_err}") from ch_err
     except Exception as e:
-        print(f"Unexpected error during ClickHouse connection: {e}")
-        raise ConnectionError(f"An unexpected error occurred: {e}") from e
+        logging.error(f"Unexpected error during ClickHouse connection setup: {e}", exc_info=True)
+        raise ConnectionError(f"An unexpected error occurred during connection setup: {e}") from e
+
 
 @app.route('/')
 def index():
@@ -108,84 +177,96 @@ def index():
 @app.route('/get_tables', methods=['POST'])
 def get_tables():
     config = request.json
+    client = None
     try:
         client = get_clickhouse_client(config)
-        # Use system.tables to get tables from the specified database
-        # We query `system.tables` and filter by the database from the config
-        # Adding limit to avoid fetching too many tables in large environments
         query = f"SELECT name FROM system.tables WHERE database = %(database)s ORDER BY name LIMIT 1000"
+        logging.info(f"Fetching tables for database: {config.get('database')}")
         tables_result = client.query(query, parameters={'database': config['database']})
         tables = [row[0] for row in tables_result.result_rows]
-        client.close()
+        logging.info(f"Found {len(tables)} tables.")
         return jsonify({'tables': tables})
     except (ValueError, ConnectionError, clickhouse_connect.driver.exceptions.Error) as e:
-        return jsonify({'error': str(e)}), 400 # Bad request for config/connection issues
+        logging.error(f"Failed to get tables: {e}")
+        return jsonify({'error': str(e)}), 400
     except Exception as e:
-        print(f"Error in /get_tables: {e}")
+        logging.error(f"Unexpected error in /get_tables: {e}", exc_info=True)
         return jsonify({'error': 'An unexpected server error occurred while fetching tables.'}), 500
+    finally:
+        if client:
+            client.close()
+
 
 @app.route('/get_columns', methods=['POST'])
 def get_columns():
     config = request.json
     source_type = config.get('source_type')
-
+    client = None
     try:
         if source_type == 'clickhouse':
             table_name = config.get('table')
             if not table_name:
                 raise ValueError("Missing 'table' parameter for ClickHouse source.")
 
-            client = get_clickhouse_client(config) # Reuses connection logic
-            # Query system.columns for the specific table and database
+            client = get_clickhouse_client(config) # Handles connection and auth
             query = f"SELECT name FROM system.columns WHERE database = %(database)s AND table = %(table)s ORDER BY position"
+            logging.info(f"Fetching columns for table: {config.get('database')}.{table_name}")
             columns_result = client.query(query, parameters={'database': config['database'], 'table': table_name})
             columns = [row[0] for row in columns_result.result_rows]
-            client.close()
             if not columns:
+                 # More specific error if table exists but no columns (unlikely) vs table not found
+                 # We can check table existence separately first if needed, but query failing is often sufficient
+                 logging.warning(f"No columns found for table '{table_name}' in db '{config['database']}'. Table might be empty or not exist.")
                  raise ValueError(f"Table '{table_name}' not found or has no columns in database '{config['database']}'.")
+            logging.info(f"Found {len(columns)} columns for table {table_name}.")
             return jsonify({'columns': columns})
 
         elif source_type == 'flatfile':
-            file_path = config.get('file_path')
+            user_file_path = config.get('file_path')
             delimiter = config.get('delimiter')
-            has_header = config.get('has_header', True) # Default to True if not provided
+            has_header = config.get('has_header', True)
 
-            if not file_path or not delimiter:
-                raise ValueError("Missing 'file_path' or 'delimiter' for Flat File source.")
+            if not delimiter:
+                raise ValueError("Missing 'delimiter' for Flat File source.")
 
-            # SECURITY WARNING: Basic path validation. In production, sanitize and restrict paths severely.
-            if not os.path.exists(file_path):
-                 raise FileNotFoundError(f"File not found at path: {file_path}")
-            if not os.path.isfile(file_path):
-                raise ValueError(f"Path is not a file: {file_path}")
+            # *** Use validated path ***
+            absolute_file_path = validate_and_normalize_path(user_file_path)
+
+            if not os.path.exists(absolute_file_path):
+                 raise FileNotFoundError(f"File not found at specified path: {user_file_path}") # Show user path in error
+            if not os.path.isfile(absolute_file_path):
+                raise ValueError(f"Specified path is not a file: {user_file_path}")
 
             if not has_header:
-                # Cannot get columns if there's no header
-                return jsonify({'columns': []}) # Return empty list, UI handles message
+                logging.info(f"Flat file source {user_file_path} has no header. Cannot extract columns.")
+                return jsonify({'columns': []})
 
             try:
-                # Read only the header row using pandas
-                df_header = pd.read_csv(file_path, sep=delimiter, nrows=0) # nrows=0 reads just the header
+                logging.info(f"Reading header from file: {user_file_path}")
+                df_header = pd.read_csv(absolute_file_path, sep=delimiter, nrows=0) # Reads just header
                 columns = df_header.columns.tolist()
+                logging.info(f"Extracted columns from header: {columns}")
                 return jsonify({'columns': columns})
             except pd.errors.EmptyDataError:
-                 raise ValueError(f"File '{os.path.basename(file_path)}' appears to be empty.") from None
-            except Exception as pd_err: # Catch potential pandas parsing errors
-                raise ValueError(f"Error reading header from file '{os.path.basename(file_path)}': {pd_err}") from pd_err
-
+                 logging.warning(f"File '{user_file_path}' appears to be empty.")
+                 raise ValueError(f"File '{os.path.basename(user_file_path)}' appears to be empty.") from None
+            except Exception as pd_err:
+                logging.error(f"Error reading header from file '{user_file_path}': {pd_err}", exc_info=True)
+                raise ValueError(f"Error reading header from file '{os.path.basename(user_file_path)}': Check format and delimiter.") from pd_err
         else:
             raise ValueError(f"Invalid source_type specified: {source_type}")
 
     except (ValueError, ConnectionError, FileNotFoundError, clickhouse_connect.driver.exceptions.Error) as e:
-        print(f"Error getting columns: {e}")
-        return jsonify({'error': str(e)}), 400 # Config, connection, or file error
+        logging.error(f"Failed to get columns: {e}")
+        return jsonify({'error': str(e)}), 400
     except Exception as e:
-        # Catch-all for unexpected server errors
-        print(f"Unexpected error in /get_columns: {e}")
-        # Avoid leaking detailed internal errors to the client in production
+        logging.error(f"Unexpected error in /get_columns: {e}", exc_info=True)
         return jsonify({'error': 'An unexpected server error occurred while fetching columns.'}), 500
+    finally:
+        if client:
+            client.close()
 
-# --- Helper for FF -> CH Schema Generation ---
+# --- Helper for FF -> CH Schema Generation (remains the same) ---
 
 def pandas_to_clickhouse_type(dtype):
     """Maps pandas dtype to a suitable ClickHouse data type string."""
@@ -206,7 +287,7 @@ def pandas_to_clickhouse_type(dtype):
         # Default to String for objects/strings
         return 'String'
     else:
-        print(f"Warning: Unhandled pandas dtype: {dtype}. Defaulting to String.")
+        logging.warning(f"Unhandled pandas dtype: {dtype}. Defaulting to String.")
         return 'String' # Fallback
 
 # --- Main Ingestion Endpoint ---
@@ -215,203 +296,227 @@ def pandas_to_clickhouse_type(dtype):
 def ingest():
     config = request.json
     flow_type = config.get('flow_type')
-    client = None # Initialize client variable
+    client = None
     processed_count = 0
 
-    print(f"Starting ingestion flow: {flow_type}")
-    print(f"Received config (sensitive data redacted): {{k: v for k, v in config.items() if k not in ['password', 'jwt']}}")
+    logging.info(f"Starting ingestion flow: {flow_type}")
+    # Avoid logging sensitive data from config
+    log_config = {k: v for k, v in config.items() if k not in ['password', 'jwt']}
+    logging.debug(f"Received config (sensitive data redacted): {log_config}")
 
     try:
         if flow_type == 'ch_to_ff':
             # --- ClickHouse to Flat File ---
-            print("Executing ClickHouse -> Flat File flow")
+            logging.info("Executing ClickHouse -> Flat File flow")
             selected_columns = config.get('columns', [])
             source_table = config.get('source_table')
-            target_file = config.get('target_file')
+            user_target_file = config.get('target_file')
             target_delimiter = config.get('target_delimiter')
             include_header = config.get('include_header', True)
 
-            # Basic validation
+            # --- Input Validation ---
             if not selected_columns:
                 raise ValueError("No columns selected for ingestion.")
             if not source_table:
                 raise ValueError("Source ClickHouse table not specified.")
-            if not target_file or not target_delimiter:
-                 raise ValueError("Target file path or delimiter not specified.")
+            if not target_delimiter:
+                 raise ValueError("Target file delimiter not specified.")
 
-            # SECURITY WARNING: Validate target_file path in production!
-            # Ensure it's within an allowed directory, sanitize name, etc.
-            target_dir = os.path.dirname(target_file)
-            if target_dir and not os.path.exists(target_dir):
-                print(f"Target directory {target_dir} does not exist, attempting to create.")
+            absolute_target_file = validate_and_normalize_path(user_target_file)
+            target_dir = os.path.dirname(absolute_target_file)
+            # Ensure target directory exists (create if needed and possible)
+            if not os.path.exists(target_dir):
+                logging.info(f"Target directory {target_dir} does not exist, attempting to create.")
                 try:
                     os.makedirs(target_dir, exist_ok=True)
                 except OSError as e:
-                     raise ValueError(f"Failed to create target directory '{target_dir}': {e}")
+                     logging.error(f"Failed to create target directory '{target_dir}': {e}")
+                     # Raise a user-friendly error
+                     raise ValueError(f"Cannot create target directory for file '{user_target_file}'. Check permissions.")
+            # --- End Validation ---
 
-            client = get_clickhouse_client(config)
-            # Quote column names to handle special characters/keywords
+            client = get_clickhouse_client(config) # Handles connection and auth
             quoted_columns = [f'"{col}"' for col in selected_columns]
             select_query = f'SELECT {", ".join(quoted_columns)} FROM "{config["database"]}"."{source_table}"'
 
-            print(f"Executing query: {select_query}")
-            # Use query_df for simplicity with Pandas. For very large tables, consider client.query_arrow() or client.iterate()
+            logging.info(f"Executing query: {select_query}")
+            # TODO: Implement streaming/batching for large data instead of query_df
             df = client.query_df(select_query)
             processed_count = len(df)
-            print(f"Fetched {processed_count} records from ClickHouse.")
+            logging.info(f"Fetched {processed_count} records from ClickHouse table {source_table}.")
 
-            print(f"Writing data to {target_file} with delimiter '{target_delimiter}'")
-            df.to_csv(target_file, sep=target_delimiter, index=False, header=include_header, quoting=1) # quoting=1 (QUOTE_MINIMAL)
+            logging.info(f"Writing data to {user_target_file} (at {absolute_target_file}) with delimiter '{target_delimiter}'")
+            try:
+                df.to_csv(absolute_target_file, sep=target_delimiter, index=False, header=include_header, quoting=1)
+            except IOError as e:
+                logging.error(f"Failed to write to target file {absolute_target_file}: {e}")
+                raise RuntimeError(f"Failed to write data to file '{user_target_file}'. Check permissions and disk space.") from e
+            except Exception as e:
+                 logging.error(f"Unexpected error writing CSV to {absolute_target_file}: {e}", exc_info=True)
+                 raise RuntimeError(f"An unexpected error occurred while writing the output file.") from e
 
-            print("ClickHouse -> Flat File ingestion successful.")
+            logging.info("ClickHouse -> Flat File ingestion successful.")
             return jsonify({'success': True, 'records_processed': processed_count})
 
         elif flow_type == 'ff_to_ch':
             # --- Flat File to ClickHouse ---
-            print("Executing Flat File -> ClickHouse flow")
-            source_file = config.get('source_file')
+            logging.info("Executing Flat File -> ClickHouse flow")
+            user_source_file = config.get('source_file')
             source_delimiter = config.get('source_delimiter')
             source_has_header = config.get('source_has_header', True)
-            selected_columns = config.get('columns', []) # Columns selected in UI (usually from header)
+            selected_columns = config.get('columns', [])
             target_table = config.get('target_table')
             target_create = config.get('target_create', False)
 
-            # Basic validation
-            if not source_file or not source_delimiter:
-                raise ValueError("Source file path or delimiter not specified.")
+            # --- Input Validation ---
+            if not source_delimiter:
+                raise ValueError("Source file delimiter not specified.")
             if not target_table:
                 raise ValueError("Target ClickHouse table not specified.")
-            if not os.path.exists(source_file):
-                 raise FileNotFoundError(f"Source file not found: {source_file}")
-            if not os.path.isfile(source_file):
-                raise ValueError(f"Source path is not a file: {source_file}")
 
-            print(f"Reading data from {source_file}")
-            # Read the CSV
+            absolute_source_file = validate_and_normalize_path(user_source_file)
+
+            if not os.path.exists(absolute_source_file):
+                 raise FileNotFoundError(f"Source file not found: {user_source_file}")
+            if not os.path.isfile(absolute_source_file):
+                raise ValueError(f"Source path is not a file: {user_source_file}")
+            # --- End Validation ---
+
+            logging.info(f"Reading data from {user_source_file} (at {absolute_source_file})")
             try:
-                # Use low_memory=False to prevent mixed type inference issues on large files
+                # TODO: Implement streaming/batching for large data instead of reading all at once
                 df = pd.read_csv(
-                    source_file,
+                    absolute_source_file,
                     sep=source_delimiter,
                     header=0 if source_has_header else None,
                     low_memory=False
                 )
-
+                # ... (rest of column selection logic remains similar) ...
                 if source_has_header:
-                     # If header exists and columns were selected, use only selected columns
                      if selected_columns:
-                         # Ensure selected columns actually exist in the DataFrame
                          missing_cols = [col for col in selected_columns if col not in df.columns]
                          if missing_cols:
                               raise ValueError(f"Selected columns not found in file header: {missing_cols}")
                          df = df[selected_columns]
-                     # Else (if header exists but no columns selected), use all columns from header
                 else:
-                    # No header: DataFrame gets default integer column names (0, 1, 2...)
-                    # Ingestion will likely fail unless target table schema matches exactly by position
-                    # or manual column mapping is implemented (future enhancement).
-                    print("Warning: Reading file without header. Column matching relies on position.")
+                    logging.warning("Reading file without header. Column matching relies on position.")
                     if selected_columns:
-                        print("Warning: Columns were selected in UI, but file has no header. Selection ignored.")
+                        logging.warning("Columns were selected in UI, but file has no header. Selection ignored.")
 
                 processed_count = len(df)
                 if processed_count == 0:
-                     print("Source file is empty. Nothing to ingest.")
+                     logging.info("Source file is empty. Nothing to ingest.")
                      return jsonify({'success': True, 'records_processed': 0})
-
-                print(f"Read {processed_count} records from file.")
+                logging.info(f"Read {processed_count} records from file.")
 
             except pd.errors.EmptyDataError:
-                 print("Source file is empty. Nothing to ingest.")
+                 logging.warning(f"Source file '{user_source_file}' is empty. Nothing to ingest.")
                  return jsonify({'success': True, 'records_processed': 0})
             except Exception as pd_err:
-                raise ValueError(f"Error reading CSV file '{os.path.basename(source_file)}': {pd_err}") from pd_err
-
+                logging.error(f"Error reading CSV file '{user_source_file}': {pd_err}", exc_info=True)
+                raise ValueError(f"Error reading CSV file '{os.path.basename(user_source_file)}'. Check format, encoding, and delimiter.") from pd_err
 
             # --- Connect to ClickHouse Target ---
             client = get_clickhouse_client(config)
             db_name = config['database']
-            full_table_name = f'"{db_name}"."{target_table}"' # Quote names
+            # Ensure table name is reasonably safe (basic check - consider more robust CSQL injection checks if needed)
+            if not target_table.isalnum() and '_' not in target_table:
+                 raise ValueError(f"Invalid target table name: {target_table}. Use alphanumeric characters and underscores.")
+            full_table_name = f'"{db_name}"."{target_table}"'
 
-            # --- Handle Table Creation ---
+            # --- Handle Table Creation (logic remains similar, added logging) ---
             table_exists = False
             try:
-                # Check if table exists (more reliable than SHOW TABLES in some contexts)
-                client.command(f'CHECK TABLE {full_table_name}')
+                logging.debug(f"Checking existence of table {full_table_name}")
+                # Using DESCRIBE can be slightly more reliable than CHECK in some edge cases
+                client.command(f'DESCRIBE TABLE {full_table_name}')
                 table_exists = True
-                print(f"Target table {full_table_name} exists.")
+                logging.info(f"Target table {full_table_name} exists.")
             except clickhouse_connect.driver.exceptions.ClickHouseError as e:
-                # Specific error code for unknown table varies, check common ones
-                # https://clickhouse.com/docs/en/interfaces/cli/error-codes
-                if 'UNKNOWN_TABLE' in str(e) or 'Table doesn\'t exist' in str(e) or 'code: 60' in str(e):
-                    print(f"Target table {full_table_name} does not exist.")
+                err_str = str(e)
+                if 'UNKNOWN_TABLE' in err_str or 'Table doesn\'t exist' in err_str or 'code: 60' in err_str:
+                    logging.info(f"Target table {full_table_name} does not exist.")
                     table_exists = False
                 else:
-                    raise # Re-raise other ClickHouse errors during check
+                    logging.warning(f"Error checking table existence for {full_table_name}: {e}")
+                    raise # Re-raise unexpected ClickHouse errors
 
             if not table_exists:
                 if target_create:
                     if not source_has_header:
                         raise ValueError("Cannot create table automatically: Source file has no header to infer schema.")
-                    print(f"Attempting to create target table {full_table_name}...")
-                    # Generate CREATE TABLE statement (basic)
-                    cols_with_types = []
-                    for col_name, dtype in df.dtypes.items():
-                         # Ensure column names are safe for SQL (basic quoting)
-                         safe_col_name = f'"{str(col_name)}"' # Quote all column names
-                         ch_type = pandas_to_clickhouse_type(dtype)
-                         cols_with_types.append(f'{safe_col_name} {ch_type}')
-
-                    # Simple MergeTree engine, adjust as needed (e.g., ORDER BY key)
-                    # Inferring a good ORDER BY key automatically is tricky. Using tuple() for no explicit key.
-                    create_statement = f"CREATE TABLE {full_table_name} (\n    {',\n    '.join(cols_with_types)}\n) ENGINE = MergeTree() ORDER BY tuple()"
-
-                    print(f"Executing CREATE TABLE:
-{create_statement}")
+                    logging.info(f"Attempting to create target table {full_table_name}...")
                     try:
+                        cols_with_types = []
+                        for col_name, dtype in df.dtypes.items():
+                             # Basic quoting for safety
+                             safe_col_name = f'"{str(col_name)}"'
+                             ch_type = pandas_to_clickhouse_type(dtype)
+                             cols_with_types.append(f'{safe_col_name} {ch_type}')
+                        # Simple MergeTree, consider allowing engine/order key specification in UI/config
+                        create_statement = f"CREATE TABLE {full_table_name} (\n    {',\n    '.join(cols_with_types)}\n) ENGINE = MergeTree() ORDER BY tuple()"
+                        logging.info(f"Executing CREATE TABLE statement for {full_table_name}")
+                        logging.debug(f"Create statement: {create_statement}")
                         client.command(create_statement)
-                        print(f"Table {full_table_name} created successfully.")
+                        logging.info(f"Table {full_table_name} created successfully.")
                     except Exception as create_err:
+                        logging.error(f"Failed to auto-create table {full_table_name}: {create_err}", exc_info=True)
                         raise RuntimeError(f"Failed to auto-create table {full_table_name}: {create_err}") from create_err
                 else:
                      raise ValueError(f"Target table {full_table_name} does not exist and 'Create Table' option was not checked.")
             elif target_create:
-                 print("Target table exists, 'Create Table' option ignored.")
+                 logging.info("Target table exists, 'Create Table' option ignored.")
 
             # --- Insert Data --- #
-            print(f"Inserting {processed_count} records into {full_table_name}...")
-            # Ensure DataFrame column names match expected format if needed (usually handled by insert_df)
-            # Consider batching inserts for very large dataframes (e.g., loop over df chunks)
-            client.insert_df(full_table_name, df)
-            print("Flat File -> ClickHouse ingestion successful.")
+            logging.info(f"Inserting {processed_count} records into {full_table_name}...")
+            try:
+                # TODO: Implement streaming/batching for large data instead of insert_df
+                client.insert_df(full_table_name, df)
+                logging.info(f"Successfully inserted {processed_count} records into {full_table_name}.")
+            except clickhouse_connect.driver.exceptions.Error as insert_err:
+                # Catch specific insertion errors
+                logging.error(f"ClickHouse insert error into {full_table_name}: {insert_err}", exc_info=True)
+                # Try to provide a more helpful message based on common errors
+                err_str = str(insert_err).lower()
+                if 'type mismatch' in err_str or 'cannot parse' in err_str:
+                    raise RuntimeError(f"Data type mismatch error inserting into {target_table}. Check file data types against table schema.") from insert_err
+                elif 'unknown column' in err_str or 'not found' in err_str:
+                    raise RuntimeError(f"Column mismatch error inserting into {target_table}. Check file header/columns against table schema.") from insert_err
+                else:
+                    raise RuntimeError(f"Error inserting data into ClickHouse table {target_table}: {insert_err}") from insert_err
+            except Exception as e:
+                 logging.error(f"Unexpected error during ClickHouse insert into {full_table_name}: {e}", exc_info=True)
+                 raise RuntimeError("An unexpected error occurred during data insertion.") from e
+
             return jsonify({'success': True, 'records_processed': processed_count})
 
         else:
             raise ValueError(f"Invalid flow_type specified: {flow_type}")
 
     except (ValueError, ConnectionError, FileNotFoundError, clickhouse_connect.driver.exceptions.Error, RuntimeError) as e:
-        # Handle known operational errors
         error_message = str(e)
-        print(f"Ingestion Error: {error_message}")
-        # Return specific errors as 400 Bad Request
+        logging.error(f"Ingestion failed: {error_message}")
         return jsonify({'success': False, 'error': error_message, 'records_processed': processed_count}), 400
     except Exception as e:
-        # Handle unexpected server errors
-        error_message = f"An unexpected server error occurred during ingestion: {e}"
-        print(f"Unexpected Ingestion Error: {e}", exc_info=True) # Log traceback for debugging
-        # Return generic error as 500 Internal Server Error
-        return jsonify({'success': False, 'error': "An unexpected server error occurred.", 'records_processed': processed_count}), 500
+        error_message = f"An unexpected server error occurred during ingestion."
+        logging.error(f"Unexpected Ingestion Error: {e}", exc_info=True)
+        return jsonify({'success': False, 'error': error_message, 'records_processed': processed_count}), 500
     finally:
-        # Ensure client connection is closed
         if client:
             try:
                 client.close()
-                print("ClickHouse connection closed.")
+                logging.info("ClickHouse connection closed.")
             except Exception as close_err:
-                 print(f"Error closing ClickHouse connection: {close_err}")
+                 logging.error(f"Error closing ClickHouse connection: {close_err}", exc_info=True)
 
 
 if __name__ == '__main__':
     # Make accessible on local network if needed, use 0.0.0.0
     # Use a specific port if default 5000 is taken
-    app.run(host='0.0.0.0', port=5000, debug=True) 
+    # Turn off debug mode for production deployment
+    is_debug = os.environ.get('FLASK_ENV') == 'development'
+    logging.info(f"Starting Flask app (Debug Mode: {is_debug})")
+    if not is_debug and JWT_SECRET_KEY == 'YOUR_REPLACE_ME_SUPER_SECRET_KEY':
+        logging.critical("CRITICAL SECURITY WARNING: Running in non-debug mode with the default JWT_SECRET_KEY!")
+
+    app.run(host='0.0.0.0', port=5000, debug=is_debug) 

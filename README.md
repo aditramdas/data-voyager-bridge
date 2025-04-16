@@ -25,7 +25,7 @@ A simple web application to facilitate data ingestion between a ClickHouse datab
 2.  **Clone the Repository (if applicable):**
 
     ```bash
-    git clone <your-repo-url>
+    git clone <https://github.com/aditramdas/data-voyager-bridge>
     cd data-voyager-bridge
     ```
 

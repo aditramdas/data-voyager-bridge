@@ -2,6 +2,9 @@
 
 A simple web application to facilitate data ingestion between a ClickHouse database and local Flat Files (CSV).
 
+![image](https://github.com/user-attachments/assets/17494d0e-c2b7-472d-b2a9-5de515f868bb)
+
+
 ## Features
 
 - Bidirectional data flow: ClickHouse <-> Flat File.

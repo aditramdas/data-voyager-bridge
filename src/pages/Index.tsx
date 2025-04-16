@@ -1,4 +1,3 @@
-
 import React, { useState } from 'react';
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
@@ -86,87 +85,146 @@ const Index = () => {
 
   // Function to connect to the source and fetch schema
   const connectToSource = async () => {
-    // In a real application, this would make an API call
     setStatus('connecting');
     setError(null);
-    
-    // Simulate API call delay
-    await new Promise(resolve => setTimeout(resolve, 1500));
-    
+    setTables([]); // Clear previous tables
+    setColumns([]); // Clear previous columns
+    setSelectedTable('');
+    setCurrentStep(1); // Stay on step 1 until connection succeeds
+
+    const payload = {
+      source_type: sourceType,
+      ...(sourceType === 'clickhouse'
+        ? { // Map frontend CH state to backend expected keys
+            host: (sourceConfig as ClickHouseConfig).host,
+            port: (sourceConfig as ClickHouseConfig).port,
+            database: (sourceConfig as ClickHouseConfig).database,
+            user: (sourceConfig as ClickHouseConfig).user,
+            jwt: (sourceConfig as ClickHouseConfig).jwtToken, // Map jwtToken to jwt
+            password: "" // TODO: Add password field to UI and state if needed
+          }
+        : { // Map frontend FF state to backend expected keys
+            file_path: (sourceConfig as FlatFileConfig).filename, // Map filename to file_path
+            delimiter: (sourceConfig as FlatFileConfig).delimiter,
+            has_header: true // Assuming header for column fetch, adjust if needed
+          })
+    };
+
     try {
+      let endpoint = '';
       if (sourceType === 'clickhouse') {
-        // Simulate fetching tables from ClickHouse
-        setTables(['users', 'orders', 'products', 'transactions']);
-        setStatus('idle');
+        endpoint = '/api/get_tables'; // Endpoint to get tables for ClickHouse
       } else {
-        // Simulate fetching columns from flat file
-        const mockColumns: Column[] = [
-          { name: 'id', type: 'INTEGER', selected: true },
-          { name: 'name', type: 'STRING', selected: true },
-          { name: 'email', type: 'STRING', selected: true },
-          { name: 'created_at', type: 'TIMESTAMP', selected: true },
-          { name: 'status', type: 'STRING', selected: true },
-          { name: 'amount', type: 'FLOAT', selected: true },
-        ];
-        setColumns(mockColumns);
-        setCurrentStep(3);
-        setStatus('idle');
+        endpoint = '/api/get_columns'; // Endpoint to get columns for Flat File
       }
-      toast({
-        title: "Connection Successful",
-        description: sourceType === 'clickhouse' ? "Connected to ClickHouse database" : "Loaded flat file schema",
+
+      const response = await fetch(endpoint, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload)
       });
-    } catch (err) {
+
+      const data = await response.json();
+
+      if (!response.ok) {
+        throw new Error(data.error || `HTTP error! status: ${response.status}`);
+      }
+
+      if (sourceType === 'clickhouse') {
+        if (data.tables) {
+          setTables(data.tables);
+          setStatus('idle');
+          setCurrentStep(2); // Move to table selection step
+          toast({
+            title: "Connection Successful",
+            description: "Fetched ClickHouse tables. Please select one.",
+          });
+        } else {
+           throw new Error("No tables found or invalid response from server.");
+        }
+      } else { // Flat File
+        if (data.columns) {
+          setColumns(data.columns); // Backend now returns the correct structure
+          setCurrentStep(3); // Move to column selection step
+          setStatus('idle');
+           toast({
+            title: "Connection Successful",
+            description: "Loaded columns from flat file header.",
+          });
+        } else {
+           throw new Error("No columns found or invalid response from server.");
+        }
+      }
+    } catch (err: any) {
       setStatus('error');
-      setError('Failed to connect to source');
+      const errorMsg = err.message || 'Failed to connect to source or fetch schema';
+      setError(errorMsg);
       toast({
         title: "Connection Failed",
-        description: "Could not connect to the data source",
+        description: errorMsg,
         variant: "destructive",
       });
     }
   };
 
-  // Function to load columns from a selected table
+  // Function to load columns from a selected table (ClickHouse only)
   const loadColumns = async () => {
-    if (!selectedTable && sourceType === 'clickhouse') {
+    if (sourceType !== 'clickhouse' || !selectedTable) {
       toast({
-        title: "No Table Selected",
-        description: "Please select a table first",
+        title: "Invalid Action",
+        description: "Please select a ClickHouse table first.",
         variant: "destructive",
       });
       return;
     }
-    
+
     setStatus('fetching');
     setError(null);
-    
-    // Simulate API call delay
-    await new Promise(resolve => setTimeout(resolve, 1000));
-    
+    setColumns([]); // Clear previous columns
+
+    const payload = {
+        source_type: 'clickhouse',
+        table: selectedTable,
+        host: (sourceConfig as ClickHouseConfig).host,
+        port: (sourceConfig as ClickHouseConfig).port,
+        database: (sourceConfig as ClickHouseConfig).database,
+        user: (sourceConfig as ClickHouseConfig).user,
+        jwt: (sourceConfig as ClickHouseConfig).jwtToken, // Map jwtToken to jwt
+        password: "" // TODO: Add password field
+      };
+
     try {
-      // Mock columns for the selected table
-      const mockColumns: Column[] = [
-        { name: 'id', type: 'INTEGER', selected: true },
-        { name: 'user_id', type: 'INTEGER', selected: true },
-        { name: 'product_id', type: 'INTEGER', selected: true },
-        { name: 'quantity', type: 'INTEGER', selected: true },
-        { name: 'price', type: 'FLOAT', selected: true },
-        { name: 'created_at', type: 'TIMESTAMP', selected: true },
-      ];
-      setColumns(mockColumns);
-      setStatus('idle');
-      setCurrentStep(3);
-      toast({
-        title: "Columns Loaded",
-        description: `Loaded ${mockColumns.length} columns from ${selectedTable}`,
+      const response = await fetch('/api/get_columns', { // Use the get_columns endpoint
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload)
       });
-    } catch (err) {
+
+      const data = await response.json();
+
+      if (!response.ok) {
+        throw new Error(data.error || `HTTP error! status: ${response.status}`);
+      }
+
+      if (data.columns && data.columns.length > 0) {
+        setColumns(data.columns); // Backend provides name, type, selected
+        setStatus('idle');
+        setCurrentStep(3); // Move to column selection
+        toast({
+          title: "Columns Loaded",
+          description: `Loaded ${data.columns.length} columns from ${selectedTable}`,
+        });
+      } else {
+         throw new Error("No columns found for the selected table or invalid server response.");
+      }
+
+    } catch (err: any) {
       setStatus('error');
-      setError('Failed to load columns');
+      const errorMsg = err.message || 'Failed to load columns';
+      setError(errorMsg);
       toast({
         title: "Failed to Load Columns",
-        description: "Could not fetch column information",
+        description: errorMsg,
         variant: "destructive",
       });
     }
@@ -174,9 +232,11 @@ const Index = () => {
 
   // Function to start the data ingestion process
   const startIngestion = async () => {
-    const selectedColumns = columns.filter(col => col.selected);
-    
-    if (selectedColumns.length === 0) {
+    const selectedColumnNames = columns
+        .filter(col => col.selected)
+        .map(col => col.name);
+
+    if (selectedColumnNames.length === 0) {
       toast({
         title: "No Columns Selected",
         description: "Please select at least one column for ingestion",
@@ -184,29 +244,88 @@ const Index = () => {
       });
       return;
     }
-    
+
     setStatus('ingesting');
     setError(null);
     setRecordCount(null);
-    
-    // Simulate ingestion process
-    await new Promise(resolve => setTimeout(resolve, 3000));
-    
+
+    // --- Construct Payload based on flow direction ---
+    let payload: any = {
+      columns: selectedColumnNames,
+    };
+
+    if (sourceType === 'clickhouse' && targetType === 'flatfile') {
+      payload = {
+        ...payload,
+        flow_type: 'ch_to_ff',
+        // Source ClickHouse config
+        host: (sourceConfig as ClickHouseConfig).host,
+        port: (sourceConfig as ClickHouseConfig).port,
+        database: (sourceConfig as ClickHouseConfig).database,
+        user: (sourceConfig as ClickHouseConfig).user,
+        jwt: (sourceConfig as ClickHouseConfig).jwtToken,
+        password: "", // TODO: Add password field
+        source_table: selectedTable,
+        // Target Flat File config
+        target_file: (targetConfig as FlatFileConfig).filename, // Map filename to target_file
+        target_delimiter: (targetConfig as FlatFileConfig).delimiter,
+        include_header: true // TODO: Make this configurable in TargetConfig UI
+      };
+    } else if (sourceType === 'flatfile' && targetType === 'clickhouse') {
+       payload = {
+         ...payload,
+         flow_type: 'ff_to_ch',
+         // Source Flat File config
+         source_file: (sourceConfig as FlatFileConfig).filename, // Map filename to source_file
+         source_delimiter: (sourceConfig as FlatFileConfig).delimiter,
+         source_has_header: true, // Assuming header if columns were selectable
+         // Target ClickHouse config
+         host: (targetConfig as ClickHouseConfig).host,
+         port: (targetConfig as ClickHouseConfig).port,
+         database: (targetConfig as ClickHouseConfig).database,
+         user: (targetConfig as ClickHouseConfig).user,
+         jwt: (targetConfig as ClickHouseConfig).jwtToken,
+         password: "", // TODO: Add password field
+         target_table: (targetConfig as ClickHouseConfig).table, // Assumes table is part of CH config
+         target_create: true // TODO: Make this configurable in TargetConfig UI
+       };
+    } else {
+      toast({ title: "Invalid Flow", description: "Source/Target combination not supported.", variant: "destructive" });
+      setStatus('error');
+      setError('Invalid flow configuration');
+      return;
+    }
+    // --- End Payload Construction ---
+
     try {
-      // Mock successful ingestion
-      const count = Math.floor(Math.random() * 10000) + 1000;
+      const response = await fetch('/api/ingest', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload)
+      });
+
+      const data = await response.json();
+
+      if (!response.ok || !data.success) {
+        throw new Error(data.error || `HTTP error! status: ${response.status}`);
+      }
+
+      // Handle success
+      const count = data.records_processed;
       setRecordCount(count);
       setStatus('completed');
       toast({
         title: "Ingestion Complete",
-        description: `Successfully processed ${count.toLocaleString()} records`,
+        description: `Successfully processed ${count?.toLocaleString() ?? '0'} records`,
       });
-    } catch (err) {
+
+    } catch (err: any) {
       setStatus('error');
-      setError('Failed to complete data ingestion');
+      const errorMsg = err.message || 'Failed to complete data ingestion';
+      setError(errorMsg);
       toast({
         title: "Ingestion Failed",
-        description: "An error occurred during data transfer",
+        description: errorMsg,
         variant: "destructive",
       });
     }

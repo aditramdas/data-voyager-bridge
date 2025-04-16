@@ -202,24 +202,33 @@ def get_columns():
     config = request.json
     source_type = config.get('source_type')
     client = None
+    columns_data = [] # Initialize list to hold column dicts
     try:
         if source_type == 'clickhouse':
             table_name = config.get('table')
             if not table_name:
                 raise ValueError("Missing 'table' parameter for ClickHouse source.")
 
-            client = get_clickhouse_client(config) # Handles connection and auth
-            query = f"SELECT name FROM system.columns WHERE database = %(database)s AND table = %(table)s ORDER BY position"
-            logging.info(f"Fetching columns for table: {config.get('database')}.{table_name}")
+            client = get_clickhouse_client(config)
+            # Fetch name and type from system.columns
+            query = f"SELECT name, type FROM system.columns WHERE database = %(database)s AND table = %(table)s ORDER BY position"
+            logging.info(f"Fetching columns and types for table: {config.get('database')}.{table_name}")
             columns_result = client.query(query, parameters={'database': config['database'], 'table': table_name})
-            columns = [row[0] for row in columns_result.result_rows]
-            if not columns:
-                 # More specific error if table exists but no columns (unlikely) vs table not found
-                 # We can check table existence separately first if needed, but query failing is often sufficient
+
+            if not columns_result.result_rows:
                  logging.warning(f"No columns found for table '{table_name}' in db '{config['database']}'. Table might be empty or not exist.")
                  raise ValueError(f"Table '{table_name}' not found or has no columns in database '{config['database']}'.")
-            logging.info(f"Found {len(columns)} columns for table {table_name}.")
-            return jsonify({'columns': columns})
+
+            # Format the output as required by frontend
+            for name, ch_type in columns_result.result_rows:
+                columns_data.append({
+                    'name': name,
+                    'type': ch_type, # Use the type directly from ClickHouse
+                    'selected': True # Default to selected
+                })
+
+            logging.info(f"Found {len(columns_data)} columns for table {table_name}.")
+            return jsonify({'columns': columns_data})
 
         elif source_type == 'flatfile':
             user_file_path = config.get('file_path')
@@ -229,11 +238,10 @@ def get_columns():
             if not delimiter:
                 raise ValueError("Missing 'delimiter' for Flat File source.")
 
-            # *** Use validated path ***
             absolute_file_path = validate_and_normalize_path(user_file_path)
 
             if not os.path.exists(absolute_file_path):
-                 raise FileNotFoundError(f"File not found at specified path: {user_file_path}") # Show user path in error
+                 raise FileNotFoundError(f"File not found at specified path: {user_file_path}")
             if not os.path.isfile(absolute_file_path):
                 raise ValueError(f"Specified path is not a file: {user_file_path}")
 
@@ -242,17 +250,39 @@ def get_columns():
                 return jsonify({'columns': []})
 
             try:
-                logging.info(f"Reading header from file: {user_file_path}")
-                df_header = pd.read_csv(absolute_file_path, sep=delimiter, nrows=0) # Reads just header
-                columns = df_header.columns.tolist()
-                logging.info(f"Extracted columns from header: {columns}")
-                return jsonify({'columns': columns})
+                logging.info(f"Inferring columns and types from file: {user_file_path}")
+                # Read a sample of rows to infer types more accurately than just header
+                # Adjust nrows based on expected file structure variability
+                df_sample = pd.read_csv(absolute_file_path, sep=delimiter, nrows=100, low_memory=False)
+
+                if df_sample.empty:
+                     logging.warning(f"File '{user_file_path}' has a header but appears to have no data rows for type inference.")
+                     # Fallback: return columns with unknown type
+                     for col_name in df_sample.columns:
+                         columns_data.append({'name': col_name, 'type': 'UNKNOWN', 'selected': True})
+                else:
+                    # Infer types from the sample
+                    for col_name in df_sample.columns:
+                        # Map pandas dtype to a simpler string representation (or keep CH types)
+                        # Using the existing CH mapping function here for consistency
+                        inferred_type = pandas_to_clickhouse_type(df_sample[col_name].dtype)
+                        columns_data.append({
+                            'name': col_name,
+                            'type': inferred_type,
+                            'selected': True
+                        })
+
+                logging.info(f"Inferred {len(columns_data)} columns from file {user_file_path}.")
+                return jsonify({'columns': columns_data})
+
             except pd.errors.EmptyDataError:
-                 logging.warning(f"File '{user_file_path}' appears to be empty.")
-                 raise ValueError(f"File '{os.path.basename(user_file_path)}' appears to be empty.") from None
+                 # This case means the file is completely empty (no header either)
+                 logging.warning(f"File '{user_file_path}' is completely empty.")
+                 # Technically caught by os.path.exists, but good practice
+                 return jsonify({'columns': []}) # Return empty list
             except Exception as pd_err:
-                logging.error(f"Error reading header from file '{user_file_path}': {pd_err}", exc_info=True)
-                raise ValueError(f"Error reading header from file '{os.path.basename(user_file_path)}': Check format and delimiter.") from pd_err
+                logging.error(f"Error reading sample from file '{user_file_path}': {pd_err}", exc_info=True)
+                raise ValueError(f"Error reading file '{os.path.basename(user_file_path)}': Check format, encoding, and delimiter.") from pd_err
         else:
             raise ValueError(f"Invalid source_type specified: {source_type}")
 
@@ -454,7 +484,9 @@ def ingest():
                              ch_type = pandas_to_clickhouse_type(dtype)
                              cols_with_types.append(f'{safe_col_name} {ch_type}')
                         # Simple MergeTree, consider allowing engine/order key specification in UI/config
-                        create_statement = f"CREATE TABLE {full_table_name} (\n    {',\n    '.join(cols_with_types)}\n) ENGINE = MergeTree() ORDER BY tuple()"
+                        # Construct the columns part of the query with newlines and indentation
+                        columns_sql_part = ",\n    ".join(cols_with_types)
+                        create_statement = f"CREATE TABLE {full_table_name} (\n    {columns_sql_part}\n) ENGINE = MergeTree() ORDER BY tuple()"
                         logging.info(f"Executing CREATE TABLE statement for {full_table_name}")
                         logging.debug(f"Create statement: {create_statement}")
                         client.command(create_statement)

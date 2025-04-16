@@ -38,7 +38,7 @@ A web application built with React (TypeScript, Vite) and a Flask (Python) backe
 2.  **Clone the Repository (if applicable):**
 
     ```bash
-    git clone <your-repo-url>
+    git clone https://github.com/aditramdas/data-voyager-bridge
     cd data-voyager-bridge
     ```
 
